@@ -274,13 +274,11 @@ func TestScatterGather(t *testing.T) {
 	}
 	defer syscall.CloseHandle(handle)
 
-	readMemory := virtualPage(t, pageSize)
-	writeMemory := virtualPage(t, pageSize)
-	readBuffer := unsafe.Slice((*byte)(readMemory), pageSize)
-	writeBuffer := unsafe.Slice((*byte)(writeMemory), pageSize)
+	readBuffer := alignedPage(t, pageSize)
+	writeBuffer := alignedPage(t, pageSize)
 	copy(writeBuffer, bytes.Repeat([]byte{'w'}, pageSize))
-	readSegments := []FileSegment{FileSegmentFromPointer(readMemory)}
-	writeSegments := []FileSegment{FileSegmentFromPointer(writeMemory)}
+	readSegments := []FileSegment{FileSegmentFromPointer(unsafe.Pointer(unsafe.SliceData(readBuffer)))}
+	writeSegments := []FileSegment{FileSegmentFromPointer(unsafe.Pointer(unsafe.SliceData(writeBuffer)))}
 	var segmentPinner runtime.Pinner
 	segmentPinner.Pin(unsafe.SliceData(readSegments))
 	segmentPinner.Pin(unsafe.SliceData(writeSegments))
@@ -432,27 +430,17 @@ func TestSubmitTimeout(t *testing.T) {
 	}
 }
 
-func virtualPage(t *testing.T, size int) unsafe.Pointer {
+func alignedPage(t *testing.T, size int) []byte {
 	t.Helper()
-	dll := syscall.NewLazyDLL("kernel32.dll")
-	virtualAlloc := dll.NewProc("VirtualAlloc")
-	virtualFree := dll.NewProc("VirtualFree")
-	const (
-		memCommit     = 0x1000
-		memReserve    = 0x2000
-		memRelease    = 0x8000
-		pageReadWrite = 0x04
-	)
-	address, _, errno := virtualAlloc.Call(0, uintptr(size), memCommit|memReserve, pageReadWrite)
-	if address == 0 {
-		t.Fatalf("VirtualAlloc: %v", errno)
-	}
-	t.Cleanup(func() {
-		if ok, _, errno := virtualFree.Call(address, 0, memRelease); ok == 0 {
-			t.Errorf("VirtualFree: %v", errno)
-		}
-	})
-	return unsafe.Pointer(address)
+	pageSize := os.Getpagesize()
+	storage := make([]byte, size+pageSize-1)
+	base := uintptr(unsafe.Pointer(unsafe.SliceData(storage)))
+	offset := int((uintptr(pageSize) - base%uintptr(pageSize)) % uintptr(pageSize))
+	buffer := storage[offset : offset+size]
+	var pinner runtime.Pinner
+	pinner.Pin(unsafe.SliceData(buffer))
+	t.Cleanup(pinner.Unpin)
+	return buffer
 }
 
 func createEvent(t *testing.T) syscall.Handle {
